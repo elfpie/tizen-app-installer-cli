@@ -168,9 +168,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload release assets (all zips)
+        shell: bash
         run: |
           set -e
-          UPLOAD_URL="${{ steps.create_release.outputs.upload_url }}"
+          # get upload_url and strip the template part {?...}
+          UPLOAD_URL_TEMPLATE="${{ steps.create_release.outputs.upload_url }}"
+          UPLOAD_URL="${UPLOAD_URL_TEMPLATE%\{*}"
+          echo "Base upload URL: $UPLOAD_URL"
+
           find downloaded_artifacts -type f -name '*.zip' -print0 | while IFS= read -r -d '' file; do
             name=$(basename "$file")
             echo "Uploading $name ..."
@@ -178,7 +183,7 @@ jobs:
               -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               -H "Content-Type: application/zip" \
               --data-binary @"$file" \
-              "${UPLOAD_URL}?name=${name}"
+              "${UPLOAD_URL}?name=$(printf '%s' "$name" | jq -s -R -r @uri)"
             echo "Uploaded $name"
           done
         env:
