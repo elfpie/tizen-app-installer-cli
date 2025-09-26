@@ -55,6 +55,7 @@ jobs:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Restore (project + rid)
+        shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           set -e
@@ -63,13 +64,13 @@ jobs:
           dotnet restore "${{ env.CSPROJ }}" -r $RID
 
       - name: Publish (AOT, self-contained) for ${{ matrix.rid }}
+        shell: bash
         working-directory: ${{ github.workspace }}
         run: |
           set -e
           RID=${{ matrix.rid }}
           OUT="${{ env.OUTPUT_BASE }}/${RID}"
           mkdir -p "$OUT"
-          # Publish AOT self-contained for the specific project (not the solution)
           dotnet publish "${{ env.CSPROJ }}" -c Release -r $RID -p:PublishAot=true -p:PublishTrimmed=true --self-contained true -o "$OUT/publish" --no-restore
 
       - name: Prepare packaging (collect executable + SamsungCerts)
