@@ -1,135 +1,198 @@
-name: Build & Release TizenAppInstaller (Native AOT)
+name: Build & Draft Release (multi-rid AOT)
 
-# only run on direct pushes to master
 on:
-  push:
-    branches:
-      - master
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to create (example: v1.2.3). If empty a generated tag will be used.'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'v*'   # If you push a tag like v1.0.0 it will also trigger this
 
 permissions:
-  contents: write   # needed to create releases and upload assets
-  actions: read
+  contents: write   # needed for creating releases & uploading assets
 
 env:
   DOTNET_VERSION: '9.0.x'
-  OUTPUT_DIR: out
-  CLI_NAME: TizenAppInstaller
+  PROJECT_PATH: '.'   # adjust if your csproj is in a subfolder, e.g. 'src/MyApp'
+  OUTPUT_BASE: ${{ github.workspace }}/artifacts
 
 jobs:
   build:
-    name: Build matrix
-    # use an include matrix so we can pick different runners per RID
-    runs-on: ${{ matrix.os }}
+    name: Publish for multiple runtimes
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - rid: linux-x64
-            os: ubuntu-latest
-          - rid: linux-musl-x64
-            os: ubuntu-latest
+            runner: ubuntu-latest
+            archive_name: TizenAppInstallerCli-linux-x64.zip
           - rid: win-x64
-            os: windows-latest
-          - rid: osx-arm64
-            os: macos-latest
+            runner: windows-latest
+            archive_name: TizenAppInstallerCli-win-x64.zip
           - rid: osx-x64
-            os: macos-latest
+            runner: macos-latest
+            archive_name: TizenAppInstallerCli-osx-x64.zip
+          - rid: osx-arm64
+            runner: macos-latest
+            archive_name: TizenAppInstallerCli-osx-arm64.zip
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - name: Setup .NET ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v3
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Publish (${{ matrix.rid }})
+      - name: Restore
+        working-directory: ${{ env.PROJECT_PATH }}
+        run: dotnet restore
+
+      - name: Publish (AOT, self-contained) for ${{ matrix.rid }}
+        working-directory: ${{ env.PROJECT_PATH }}
         run: |
           set -e
-          echo "Publishing for RID: ${{ matrix.rid }} on runner $RUNNER_OS"
-          dotnet publish -c Release -r ${{ matrix.rid }} --self-contained true \
-            -p:PublishAot=true -p:PublishTrimmed=true -p:PublishSingleFile=true \
-            -o $GITHUB_WORKSPACE/${{ env.OUTPUT_DIR }}/${{ matrix.rid }}
+          RID=${{ matrix.rid }}
+          OUT="${{ env.OUTPUT_BASE }}/${RID}"
+          mkdir -p "$OUT"
+          # Publish AOT self-contained. Adjust PublishTrimmed or extra msbuild props as desired.
+          dotnet publish -c Release -r $RID -p:PublishAot=true -p:PublishTrimmed=true --self-contained true -o "$OUT/publish" --no-restore
 
-      - name: List build outputs
-        run: ls -la $GITHUB_WORKSPACE/${{ env.OUTPUT_DIR }}/${{ matrix.rid }} || true
+      - name: Prepare packaging (collect executable + SamsungCerts)
+        shell: bash
+        run: |
+          set -e
+          RID=${{ matrix.rid }}
+          OUT_DIR="${{ env.OUTPUT_BASE }}/${RID}/publish"
+          PKG_DIR="${{ env.OUTPUT_BASE }}/${RID}/package"
+          mkdir -p "$PKG_DIR"
 
-      - name: Upload artifact for ${{ matrix.rid }}
+          # Find executable name (assumes single executable with project name)
+          # On Windows it is .exe; on others no extension.
+          # Adapt the executable base name if needed.
+          EXE_NAME="TizenAppInstallerCli"
+          if [ "${RID##*-}" = "x64" ] || [ "${RID##*-}" = "arm64" ]; then
+            # nothing special here
+            :
+          fi
+
+          # Copy executable
+          if [ -f "$OUT_DIR/${EXE_NAME}" ]; then
+            cp "$OUT_DIR/${EXE_NAME}" "$PKG_DIR/"
+          elif [ -f "$OUT_DIR/${EXE_NAME}.exe" ]; then
+            cp "$OUT_DIR/${EXE_NAME}.exe" "$PKG_DIR/"
+          else
+            echo "ERROR: Executable not found in $OUT_DIR. Listing directory:"
+            ls -la "$OUT_DIR"
+            exit 2
+          fi
+
+          # Copy SamsungCerts directory (if exists)
+          if [ -d "$OUT_DIR/SamsungCerts" ]; then
+            cp -r "$OUT_DIR/SamsungCerts" "$PKG_DIR/"
+          else
+            echo "WARNING: SamsungCerts directory not found in publish output. Creating empty folder to keep zip structure consistent."
+            mkdir -p "$PKG_DIR/SamsungCerts"
+          fi
+
+      - name: Zip package
+        run: |
+          set -e
+          RID=${{ matrix.rid }}
+          PKG_DIR="${{ env.OUTPUT_BASE }}/${RID}/package"
+          DEST="${{ env.OUTPUT_BASE }}/${{ matrix.archive_name }}"
+          # Ensure previous zip removed
+          rm -f "$DEST"
+
+          if [[ "${{ matrix.runner }}" == "windows-latest" ]]; then
+            # Use PowerShell Compress-Archive on Windows
+            powershell -Command "Compress-Archive -Path '${PKG_DIR}\\*' -DestinationPath '${DEST}' -Force"
+          else
+            # Ensure zip is available on linux/macos
+            if ! command -v zip >/dev/null 2>&1; then
+              echo "zip missing; installing..."
+              if [[ "$(uname -s)" == "Darwin" ]]; then
+                brew install zip || true
+              else
+                sudo apt-get update && sudo apt-get install -y zip
+              fi
+            fi
+            (cd "$PKG_DIR" && zip -r -q "$DEST" .)
+          fi
+
+          echo "Produced $DEST"
+
+      - name: Upload artifact for release job
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.CLI_NAME }}-${{ matrix.rid }}
-          path: ${{ env.OUTPUT_DIR }}/${{ matrix.rid }}
+          name: ${{ matrix.archive_name }}
+          path: ${{ env.OUTPUT_BASE }}/${{ matrix.archive_name }}
 
   create_release:
-    name: Create release and upload assets
+    name: Create draft release and attach zips
     runs-on: ubuntu-latest
     needs: build
     steps:
-      - uses: actions/checkout@v4
-
-      # Download all artifacts created by the build matrix
-      - name: Download all artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
-          path: ${{ env.OUTPUT_DIR }}
+          # downloads all artifacts created by build jobs into ./ (will create dirs)
+          path: ./downloaded_artifacts
 
-      # Compute tag & release name
-      - name: Compute tag & release name
-        id: tag
+      - name: List downloaded artifacts
+        run: ls -la downloaded_artifacts || true
+
+      - name: Create tag if not provided, and determine tag name
+        id: tagger
         run: |
-          short_sha=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          timestamp=$(date -u +"%Y%m%dT%H%M%SZ")
-          TAG="v${timestamp}-${short_sha}"
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "name=${{ env.CLI_NAME }} ${TAG}" >> $GITHUB_OUTPUT
+          set -e
+          INPUT_TAG="${{ github.event.inputs.tag }}"
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            # Use run number to create a unique tag for draft release
+            TAG="v${{ github.run_number }}-${{ github.run_id }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      # Create draft GitHub release
-      - name: Create draft release
+      - name: Create a draft release
         id: create_release
         uses: actions/create-release@v1
         with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          release_name: ${{ steps.tag.outputs.name }}
+          tag_name: ${{ steps.tagger.outputs.tag }}
+          release_name: ${{ steps.tagger.outputs.tag }}
           draft: true
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Package only the executable + SamsungCerts into a zip
-      - name: Create zip packages
+      - name: Upload release assets (all zips)
+        # we'll loop through all .zip files and upload with actions/upload-release-asset
         run: |
           set -e
-          for rid_dir in $GITHUB_WORKSPACE/${{ env.OUTPUT_DIR }}/*; do
-            if [ -d "$rid_dir" ]; then
-              rid=$(basename "$rid_dir")
-              exe_name=$(ls "$rid_dir" | grep -v .dbg | head -n1)
-              zip_name="${{ env.CLI_NAME }}-${rid}.zip"
-              echo "Creating zip $zip_name with $exe_name + SamsungCerts..."
-              cd "$rid_dir"
-              zip -r "../../$zip_name" "$exe_name" SamsungCerts
-              cd -
-            fi
-          done
-
-      # Upload zips as release assets
-      - name: Upload release assets
-        run: |
-          set -e
-          REPO="${GITHUB_REPOSITORY}"
-          RELEASE_ID=${{ steps.create_release.outputs.id }}
-          echo "Uploading zip assets to release id: $RELEASE_ID"
-          for zip_file in $GITHUB_WORKSPACE/${{ env.CLI_NAME }}-*.zip; do
-            filename=$(basename "$zip_file")
-            echo "Uploading $filename ..."
-            upload_url="https://uploads.github.com/repos/${REPO}/releases/${RELEASE_ID}/assets?name=${filename}"
-            curl --fail -X POST \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          UPLOAD_URL="${{ steps.create_release.outputs.upload_url }}"
+          echo "upload_url: $UPLOAD_URL"
+          find downloaded_artifacts -type f -name '*.zip' -print0 | while IFS= read -r -d '' file; do
+            name=$(basename "$file")
+            echo "Uploading $name ..."
+            # use actions/upload-release-asset via curl (raw REST) because it's straightforward to loop
+            curl --fail -sS -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               -H "Content-Type: application/zip" \
-              --data-binary @"$zip_file" \
-              "$upload_url"
-            echo "Uploaded $filename"
+              --data-binary @"$file" \
+              "${UPLOAD_URL}?name=${name}"
+            echo "Uploaded $name"
           done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Show release URL
         run: |
-          echo "Draft release created: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${{ steps.tag.outputs.tag }}"
+          echo "Draft release created: https://github.com/${{ github.repository }}/releases/tag/${{ steps.tagger.outputs.tag }}"
