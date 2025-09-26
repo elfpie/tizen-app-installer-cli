@@ -104,6 +104,7 @@ jobs:
           fi
 
       - name: Zip package
+        shell: bash
         run: |
           set -e
           RID=${{ matrix.rid }}
