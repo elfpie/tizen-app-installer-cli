@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 env:
-  DOTNET_VERSION: '9.0.x'
+  DOTNET_VERSION: '10.0.x'
   # Set this to the folder that contains your .csproj (not the solution)
   PROJECT_DIR: 'TizenAppInstallerCli'   # <-- IMPORTANT: update if your csproj is in a different path
   # The path to csproj relative to repo root

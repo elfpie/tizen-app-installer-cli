@@ -3,17 +3,19 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Hosting;
 using System.Diagnostics;
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Spectre.Console;
+using Microsoft.Extensions.Logging;
 
 namespace TizenAppInstallerCli.SigningManager;
 
 public class SamsungLoginService
 {
-    private IWebHost? _callbackServer;
+    private IHost? _callbackServer;
     private string? _callbackUrl;
     private readonly string _stateValue = "accountcheckdogeneratedstatetext";
 
@@ -89,75 +91,74 @@ public class SamsungLoginService
 
     private async Task StartCallbackServer(int port)
     {
-        _callbackServer = new WebHostBuilder()
-            .UseKestrel()
-            .UseUrls($"http://localhost:{port}")
-            .Configure(app =>
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseKestrel().UseUrls($"http://localhost:{port}");
+        builder.Logging.ClearProviders();
+
+        var app = builder.Build();
+        app.Run(async context =>
+        {
+            if (context.Request.Path == "/signin/callback")
             {
-                app.Run(async context =>
+                // Accept GET (query) or POST (form with code)
+                string? state = null;
+                string? codeJson = null;
+
+                if (string.Equals(context.Request.Method, "GET", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (context.Request.Path == "/signin/callback")
+                    state = context.Request.Query["state"];
+                    codeJson = context.Request.Query["code"];
+                }
+                else if (string.Equals(context.Request.Method, "POST", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
                     {
-                        // Accept GET (query) or POST (form with code)
-                        string? state = null;
-                        string? codeJson = null;
+                        var form = await context.Request.ReadFormAsync();
+                        state = form["state"];
+                        codeJson = form["code"];
+                    }
+                    catch
+                    {
+                    }
+                }
 
-                        if (string.Equals(context.Request.Method, "GET", StringComparison.OrdinalIgnoreCase))
+                if (!string.IsNullOrEmpty(codeJson))
+                {
+                    try
+                    {
+                        var auth = JsonSerializer.Deserialize<SamsungAuth>(codeJson,
+                            SamsungAuthJsonContext.Default.SamsungAuth);
+                        if (auth != null)
                         {
-                            state = context.Request.Query["state"];
-                            codeJson = context.Request.Query["code"];
-                        }
-                        else if (string.Equals(context.Request.Method, "POST", StringComparison.OrdinalIgnoreCase))
-                        {
-                            try
-                            {
-                                var form = await context.Request.ReadFormAsync();
-                                state = form["state"];
-                                codeJson = form["code"];
-                            }
-                            catch
-                            {
-                            }
-                        }
+                            auth.State = state; // set state if present
+                            CallbackReceived?.Invoke(auth);
 
-                        if (!string.IsNullOrEmpty(codeJson))
-                        {
-                            try
-                            {
-                                var auth = JsonSerializer.Deserialize<SamsungAuth>(codeJson,
-                                    SamsungAuthJsonContext.Default.SamsungAuth);
-                                if (auth != null)
-                                {
-                                    auth.State = state; // set state if present
-                                    CallbackReceived?.Invoke(auth);
-
-                                    context.Response.StatusCode = (int)HttpStatusCode.OK;
-                                    context.Response.ContentType = "text/html; charset=utf-8";
-                                    await context.Response.WriteAsync(
-                                        "<html><body><h2>Login successful</h2><p>You may now return to the application.</p></body></html>");
-                                    return;
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
-                                await context.Response.WriteAsync($"[CallbackServer] JSON parse error: {ex.Message}");
-                                return;
-                            }
+                            context.Response.StatusCode = (int)HttpStatusCode.OK;
+                            context.Response.ContentType = "text/html; charset=utf-8";
+                            await context.Response.WriteAsync(
+                                "<html><body><h2>Login successful</h2><p>You may now return to the application.</p></body></html>");
+                            return;
                         }
-
+                    }
+                    catch (Exception ex)
+                    {
                         context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
-                        await context.Response.WriteAsync("Invalid login response.");
+                        await context.Response.WriteAsync($"[CallbackServer] JSON parse error: {ex.Message}");
+                        return;
                     }
-                    else
-                    {
-                        context.Response.StatusCode = (int)HttpStatusCode.NotFound;
-                        await context.Response.WriteAsync("Not Found");
-                    }
-                });
-            })
-            .Build();
+                }
 
+                context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+                await context.Response.WriteAsync("Invalid login response.");
+            }
+            else
+            {
+                context.Response.StatusCode = (int)HttpStatusCode.NotFound;
+                await context.Response.WriteAsync("Not Found");
+            }
+        });
+
+        _callbackServer = app;
         await _callbackServer.StartAsync();
     }
 
