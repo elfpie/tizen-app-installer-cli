@@ -61,7 +61,7 @@ jobs:
           set -e
           RID=${{ matrix.rid }}
           echo "Running dotnet restore for RID=$RID on project ${{ env.CSPROJ }}"
-          dotnet restore "${{ env.CSPROJ }}" -r $RID
+          dotnet restore "${{ env.CSPROJ }}" -r $RID -p:PublishAot=true -p:PublishTrimmed=true -p:SelfContained=true
 
       - name: Publish (AOT, self-contained) for ${{ matrix.rid }}
         shell: bash
