@@ -71,7 +71,7 @@ jobs:
           RID=${{ matrix.rid }}
           OUT="${{ env.OUTPUT_BASE }}/${RID}"
           mkdir -p "$OUT"
-          dotnet publish "${{ env.CSPROJ }}" -c Release -r $RID -p:PublishAot=true -p:PublishTrimmed=true --self-contained true -o "$OUT/publish" --no-restore
+          dotnet publish "${{ env.CSPROJ }}" -c Release -r $RID -p:PublishAot=true -p:PublishTrimmed=true --self-contained true -o "$OUT/publish"
 
       - name: Prepare packaging (collect executable + SamsungCerts)
         shell: bash
