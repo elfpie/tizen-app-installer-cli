@@ -27,15 +27,23 @@ public sealed class SamsungCertificateCreator : IDisposable
     private readonly HttpClient _http = new();
     private readonly Dictionary<string, byte[]> _vdFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly string _localSamsungCertsPath;
+    private readonly string _certificateCachePath;
     private bool _disposed;
 
     private const string ExtensionsIndexUrl = "https://download.tizen.org/sdk/extensions/";
     private static string AuthorEndpoint => "https://svdca.samsungqbe.com/apis/v3/authors";
     private static string DistributorEndpoint => "https://svdca.samsungqbe.com/apis/v3/distributors";
+    private const string CachedAuthorPfxFileName = "author.p12";
+    private const string CachedDistributorPfxFileName = "distributor.p12";
+    private const string CachedDistributorResponseFileName = "distributor-response.xml";
+    private const string CacheAliasFileExtension = ".alias";
+    private static readonly X509KeyStorageFlags CachedCertificateKeyStorageFlags =
+        X509KeyStorageFlags.Exportable | X509KeyStorageFlags.EphemeralKeySet;
 
     public SamsungCertificateCreator()
     {
         _localSamsungCertsPath = Path.Combine(AppContext.BaseDirectory, "SamsungCerts");
+        _certificateCachePath = GetCertificateCachePath();
     }
 
     /// <summary>
@@ -49,6 +57,12 @@ public sealed class SamsungCertificateCreator : IDisposable
     {
         ArgumentNullException.ThrowIfNull(authorInfo);
         ArgumentNullException.ThrowIfNull(accessInfo);
+
+        if (TryLoadCachedCertificates(authorInfo, duidList, out X509Certificate2Collection? cachedAuthorCerts,
+                out X509Certificate2Collection? cachedDistributorCerts, out string cachedDistributorXml))
+        {
+            return (cachedAuthorCerts, cachedDistributorCerts, cachedDistributorXml);
+        }
 
         await EnsureVdCertificatesInMemoryAsync().ConfigureAwait(false);
 
@@ -73,6 +87,7 @@ public sealed class SamsungCertificateCreator : IDisposable
             X509Certificate2Collection distributorColl =
                 BuildDistributorCertificateChain(distributorResponse, distributorRsa, authorInfo);
 
+            TrySaveCachedCertificates(authorInfo, duidList, authorColl, distributorColl, distributorResponse);
             return (authorColl, distributorColl, distributorResponse);
         }
         finally
@@ -211,6 +226,243 @@ public sealed class SamsungCertificateCreator : IDisposable
     private byte[]? GetVdCertificate(string fileName)
     {
         return _vdFiles.GetValueOrDefault(fileName);
+    }
+
+    private bool TryLoadCachedCertificates(
+        AuthorInfo authorInfo,
+        string[] duidList,
+        out X509Certificate2Collection authorCerts,
+        out X509Certificate2Collection distributorCerts,
+        out string distributorXml)
+    {
+        string cacheKey = BuildCertificateCacheKey(authorInfo, duidList);
+        return TryLoadCachedCertificatesByCacheKey(cacheKey, out authorCerts, out distributorCerts, out distributorXml);
+    }
+
+    public bool TryLoadCachedCertificates(
+        string privilegeLevel,
+        string[] duidList,
+        out X509Certificate2Collection authorCerts,
+        out X509Certificate2Collection distributorCerts,
+        out string distributorXml)
+    {
+        authorCerts = new X509Certificate2Collection();
+        distributorCerts = new X509Certificate2Collection();
+        distributorXml = string.Empty;
+
+        string aliasPath = GetDeviceCacheAliasPath(privilegeLevel, duidList);
+        if (!File.Exists(aliasPath))
+            return false;
+
+        try
+        {
+            string cacheKey = File.ReadAllText(aliasPath).Trim();
+            if (string.IsNullOrWhiteSpace(cacheKey))
+            {
+                File.Delete(aliasPath);
+                return false;
+            }
+
+            if (TryLoadCachedCertificatesByCacheKey(cacheKey, out authorCerts, out distributorCerts, out distributorXml))
+                return true;
+
+            File.Delete(aliasPath);
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool TryLoadCachedCertificatesByCacheKey(
+        string cacheKey,
+        out X509Certificate2Collection authorCerts,
+        out X509Certificate2Collection distributorCerts,
+        out string distributorXml)
+    {
+        authorCerts = new X509Certificate2Collection();
+        distributorCerts = new X509Certificate2Collection();
+        distributorXml = string.Empty;
+
+        string cacheEntryPath = GetCertificateCacheEntryPath(cacheKey);
+        if (!Directory.Exists(cacheEntryPath))
+            return false;
+
+        string authorPfxPath = Path.Combine(cacheEntryPath, CachedAuthorPfxFileName);
+        string distributorPfxPath = Path.Combine(cacheEntryPath, CachedDistributorPfxFileName);
+        string distributorResponsePath = Path.Combine(cacheEntryPath, CachedDistributorResponseFileName);
+
+        if (!File.Exists(authorPfxPath) || !File.Exists(distributorPfxPath))
+            return false;
+
+        try
+        {
+            authorCerts = LoadCachedCertificateCollection(authorPfxPath);
+            distributorCerts = LoadCachedCertificateCollection(distributorPfxPath);
+
+            if (!IsCachedCertificateCollectionUsable(authorCerts) ||
+                !IsCachedCertificateCollectionUsable(distributorCerts))
+            {
+                DeleteDirectoryIfExists(cacheEntryPath);
+                authorCerts = new X509Certificate2Collection();
+                distributorCerts = new X509Certificate2Collection();
+                return false;
+            }
+
+            if (File.Exists(distributorResponsePath))
+            {
+                distributorXml = File.ReadAllText(distributorResponsePath);
+            }
+
+            return true;
+        }
+        catch
+        {
+            DeleteDirectoryIfExists(cacheEntryPath);
+            authorCerts = new X509Certificate2Collection();
+            distributorCerts = new X509Certificate2Collection();
+            distributorXml = string.Empty;
+            return false;
+        }
+    }
+
+    private void TrySaveCachedCertificates(
+        AuthorInfo authorInfo,
+        string[] duidList,
+        X509Certificate2Collection authorCerts,
+        X509Certificate2Collection distributorCerts,
+        string distributorXml)
+    {
+        try
+        {
+            SaveCachedCertificates(authorInfo, duidList, authorCerts, distributorCerts, distributorXml);
+        }
+        catch
+        {
+            // Certificate generation should not fail just because the cache could not be written.
+        }
+    }
+
+    private void SaveCachedCertificates(
+        AuthorInfo authorInfo,
+        string[] duidList,
+        X509Certificate2Collection authorCerts,
+        X509Certificate2Collection distributorCerts,
+        string distributorXml)
+    {
+        string cacheKey = BuildCertificateCacheKey(authorInfo, duidList);
+        string cacheEntryPath = GetCertificateCacheEntryPath(cacheKey);
+        string tempCacheEntryPath = cacheEntryPath + ".tmp";
+        string aliasPath = GetDeviceCacheAliasPath(authorInfo.PrivilegeLevel, duidList);
+        byte[] authorPfxBytes = authorCerts.Export(X509ContentType.Pkcs12, string.Empty)
+            ?? throw new InvalidOperationException("Failed to export cached author certificate bundle.");
+        byte[] distributorPfxBytes = distributorCerts.Export(X509ContentType.Pkcs12, string.Empty)
+            ?? throw new InvalidOperationException("Failed to export cached distributor certificate bundle.");
+
+        DeleteDirectoryIfExists(tempCacheEntryPath);
+        Directory.CreateDirectory(tempCacheEntryPath);
+
+        File.WriteAllBytes(
+            Path.Combine(tempCacheEntryPath, CachedAuthorPfxFileName),
+            authorPfxBytes);
+        File.WriteAllBytes(
+            Path.Combine(tempCacheEntryPath, CachedDistributorPfxFileName),
+            distributorPfxBytes);
+        File.WriteAllText(
+            Path.Combine(tempCacheEntryPath, CachedDistributorResponseFileName),
+            distributorXml);
+
+        DeleteDirectoryIfExists(cacheEntryPath);
+        Directory.Move(tempCacheEntryPath, cacheEntryPath);
+        File.WriteAllText(aliasPath, cacheKey);
+    }
+
+    private static X509Certificate2Collection LoadCachedCertificateCollection(string pfxPath)
+    {
+        byte[] pfxBytes = File.ReadAllBytes(pfxPath);
+        return X509CertificateLoader.LoadPkcs12Collection(
+            pfxBytes,
+            string.Empty,
+            CachedCertificateKeyStorageFlags);
+    }
+
+    private static bool IsCachedCertificateCollectionUsable(X509Certificate2Collection certificates)
+    {
+        if (certificates.Count == 0)
+            return false;
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        X509Certificate2? signingCert = certificates.OfType<X509Certificate2>().FirstOrDefault(c => c.HasPrivateKey);
+        if (signingCert == null)
+            return false;
+
+        return certificates
+            .OfType<X509Certificate2>()
+            .All(cert =>
+                cert.NotBefore.ToUniversalTime() <= now &&
+                cert.NotAfter.ToUniversalTime() > now);
+    }
+
+    private string GetCertificateCacheEntryPath(string cacheKey)
+    {
+        return Path.Combine(_certificateCachePath, cacheKey);
+    }
+
+    private static string BuildCertificateCacheKey(AuthorInfo authorInfo, IEnumerable<string> duidList)
+    {
+        string normalizedEmail = authorInfo.Email.Trim().ToLowerInvariant();
+        string normalizedPrivilege = authorInfo.PrivilegeLevel.Trim().ToLowerInvariant();
+        string normalizedDuidList = string.Join(
+            "\n",
+            (duidList ?? [])
+            .Where(duid => !string.IsNullOrWhiteSpace(duid))
+            .Select(duid => duid.Trim())
+            .OrderBy(duid => duid, StringComparer.OrdinalIgnoreCase));
+
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{normalizedEmail}\n{normalizedPrivilege}\n{normalizedDuidList}"));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private string GetDeviceCacheAliasPath(string privilegeLevel, IEnumerable<string> duidList)
+    {
+        string deviceCacheKey = BuildDeviceCacheKey(privilegeLevel, duidList);
+        return Path.Combine(_certificateCachePath, deviceCacheKey + CacheAliasFileExtension);
+    }
+
+    private static string BuildDeviceCacheKey(string privilegeLevel, IEnumerable<string> duidList)
+    {
+        string normalizedPrivilege = privilegeLevel.Trim().ToLowerInvariant();
+        string normalizedDuidList = string.Join(
+            "\n",
+            (duidList ?? [])
+            .Where(duid => !string.IsNullOrWhiteSpace(duid))
+            .Select(duid => duid.Trim())
+            .OrderBy(duid => duid, StringComparer.OrdinalIgnoreCase));
+
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(
+            $"{normalizedPrivilege}\n{normalizedDuidList}"));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static string GetCertificateCachePath()
+    {
+        string basePath = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(basePath))
+            basePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrWhiteSpace(basePath))
+            basePath = AppContext.BaseDirectory;
+
+        return Path.Combine(basePath, "TizenAppInstallerCli", "CertificateCache");
+    }
+
+    private static void DeleteDirectoryIfExists(string directory)
+    {
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     private async Task EnsureVdCertificatesInMemoryAsync()

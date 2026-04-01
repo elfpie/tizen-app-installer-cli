@@ -30,7 +30,8 @@ public class TizenInstaller
     {
         if (_installStream == null) throw new InvalidOperationException("Install stream not prepared. Call SignPackageIfNecessary first.");
         
-        string remotePath = $"/home/owner/share/tmp/sdk_tools/tmp/{Path.GetFileName(_packagePath)}";
+        string sdkToolPath = await GetSdkToolPath();
+        string remotePath = $"{sdkToolPath}/app{Path.GetExtension(_packagePath)}";
         string appId = await FindPackageId();
         await _sdbClient.PushAsync(_installStream, remotePath, uploadProgress);
 
@@ -72,15 +73,28 @@ public class TizenInstaller
         return new Version(version);
     }
 
+    private async Task<string> GetSdkToolPath()
+    {
+        Dictionary<string, string> capability = await _sdbClient.CapabilityAsync();
+        string sdkToolPath = capability.GetValueOrDefault("sdk_toolpath", "/home/owner/share/tmp/sdk_tools/tmp");
+
+        return sdkToolPath.TrimEnd('/');
+    }
+
     private async Task<Stream> SignApp()
     {
+        string deviceUid = await GetTvDeviceUid();
+        using SamsungCertificateCreator certCreator = new();
+
+        if (certCreator.TryLoadCachedCertificates("Public", [deviceUid], out X509Certificate2Collection authorPfx,
+                out X509Certificate2Collection distributorPfx, out _))
+        {
+            return await TizenResigner.ResignPackageAsync(_packageStream, authorPfx, distributorPfx);
+        }
+
         SamsungAuth? samsungAuth = await SamsungLoginService.PerformSamsungLoginAsync();
         if (samsungAuth is null)
             throw new Exception("Could not authenticate with Samsung servers");
-
-        SamsungCertificateCreator certCreator = new();
-
-        string deviceUid = await GetTvDeviceUid();
 
         string email = samsungAuth.InputEmailID ?? "";
         AuthorInfo authorInfo = new(
@@ -90,7 +104,7 @@ public class TizenInstaller
             PrivilegeLevel: "Public"
         );
 
-        (X509Certificate2Collection authorPfx, X509Certificate2Collection distributorPfx, _) =
+        (authorPfx, distributorPfx, _) =
             await certCreator.CreateCertificateAsync(authorInfo, samsungAuth, [deviceUid]);
         Stream signedStream = await TizenResigner.ResignPackageAsync(_packageStream, authorPfx, distributorPfx);
 
