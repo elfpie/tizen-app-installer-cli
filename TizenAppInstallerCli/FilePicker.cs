@@ -80,7 +80,7 @@ public static class FilePicker
             {
                 if (choice.Display.StartsWith("Enter path"))
                 {
-                    var path = AnsiConsole.Ask<string>("Full path to file:");
+                    string path = NormalizeManualPath(AnsiConsole.Ask<string>("Full path to file:"));
                     if (File.Exists(path) && IsAllowed(path, allowedExtensions))
                         return Path.GetFullPath(path);
 
@@ -100,6 +100,19 @@ public static class FilePicker
 
             return choice.FullPath;
         }
+    }
+
+    internal static string NormalizeManualPath(string path)
+    {
+        string trimmedPath = path.Trim();
+        if (trimmedPath.Length < 2)
+            return trimmedPath;
+
+        char first = trimmedPath[0];
+        char last = trimmedPath[^1];
+        bool hasMatchingQuotes = (first == '"' && last == '"') || (first == '\'' && last == '\'');
+
+        return hasMatchingQuotes ? trimmedPath[1..^1] : trimmedPath;
     }
 
     private static int GetTerminalHeight()
