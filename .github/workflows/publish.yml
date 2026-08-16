@@ -37,7 +37,7 @@ jobs:
             runner: windows-latest
             archive_name: TizenAppInstallerCli-win-x64.zip
           - rid: osx-x64
-            runner: macos-latest
+            runner: macos-26-intel
             archive_name: TizenAppInstallerCli-osx-x64.zip
           - rid: osx-arm64
             runner: macos-latest
@@ -45,12 +45,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Setup .NET ${{ env.DOTNET_VERSION }}
-        uses: actions/setup-dotnet@v3
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
@@ -129,10 +129,11 @@ jobs:
           echo "Produced $DEST"
 
       - name: Upload artifact for release job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.archive_name }}
           path: ${{ env.OUTPUT_BASE }}/${{ matrix.archive_name }}
+          archive: false
 
   create_release:
     name: Create draft release and attach zips
@@ -140,9 +141,10 @@ jobs:
     needs: build
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
-          path: ./downloaded_artifacts
+          merge-multiple: true
+          skip-decompress: true
 
       - name: Create tag if not provided, and determine tag name
         id: tagger
@@ -157,38 +159,8 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create a draft release
-        id: create_release
-        uses: actions/create-release@v1
+        uses: ncipollo/release-action@v1
         with:
-          tag_name: ${{ steps.tagger.outputs.tag }}
-          release_name: ${{ steps.tagger.outputs.tag }}
+          tag: ${{ steps.tagger.outputs.tag }}
+          artifacts: "*.zip"
           draft: true
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload release assets (all zips)
-        shell: bash
-        run: |
-          set -e
-          # get upload_url and strip the template part {?...}
-          UPLOAD_URL_TEMPLATE="${{ steps.create_release.outputs.upload_url }}"
-          UPLOAD_URL="${UPLOAD_URL_TEMPLATE%\{*}"
-          echo "Base upload URL: $UPLOAD_URL"
-
-          find downloaded_artifacts -type f -name '*.zip' -print0 | while IFS= read -r -d '' file; do
-            name=$(basename "$file")
-            echo "Uploading $name ..."
-            curl --fail -sS -X POST \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Content-Type: application/zip" \
-              --data-binary @"$file" \
-              "${UPLOAD_URL}?name=$(printf '%s' "$name" | jq -s -R -r @uri)"
-            echo "Uploaded $name"
-          done
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Show release URL
-        run: |
-          echo "Draft release created: https://github.com/${{ github.repository }}/releases/tag/${{ steps.tagger.outputs.tag }}"
