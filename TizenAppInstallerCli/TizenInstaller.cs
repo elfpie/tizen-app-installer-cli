@@ -35,17 +35,46 @@ public class TizenInstaller
         string appId = await FindPackageId();
         await _sdbClient.PushAsync(_installStream, remotePath, uploadProgress);
 
+        List<string> installOutput = [];
         await foreach (string line in _sdbClient.ShellCommandLinesAsync($"0 vd_appinstall {appId} {remotePath}"))
         {
-            if (installProgress == null) continue;
+            installOutput.Add(line);
 
-            var pctRx = new Regex(@"\[(\d{1,3})\]", RegexOptions.Compiled);
+            var pctRx = new Regex(@"\binstalling\[(\d{1,3})\]", RegexOptions.Compiled);
             Match m = pctRx.Match(line);
             if (m.Success && int.TryParse(m.Groups[1].Value, out int pct))
             {
-                installProgress.Report(Math.Clamp(pct, 0, 100));
+                installProgress?.Report(Math.Clamp(pct, 0, 100));
             }
         }
+
+        if (!InstallSucceeded(appId, installOutput))
+        {
+            throw new InvalidOperationException(
+                $"TV did not confirm that installation completed.{Environment.NewLine}{FormatInstallOutput(installOutput)}");
+        }
+    }
+
+    internal static bool InstallSucceeded(string appId, IEnumerable<string> lines)
+    {
+        // vd_appinstall can emit cmd_ret:0 after an application-level failure.
+        string completedMarker = $"app_id[{appId}] install completed";
+        string failedMarker = $"app_id[{appId}] install failed";
+        bool completed = false;
+
+        foreach (string line in lines)
+        {
+            if (line.Contains(failedMarker, StringComparison.Ordinal)) return false;
+            if (line.Contains(completedMarker, StringComparison.Ordinal)) completed = true;
+        }
+
+        return completed;
+    }
+
+    private static string FormatInstallOutput(IReadOnlyCollection<string> lines)
+    {
+        string output = lines.Count == 0 ? "(no installer output)" : string.Join(Environment.NewLine, lines);
+        return $"Installer output:{Environment.NewLine}{output}";
     }
 
     public async Task SignPackageIfNecessary()

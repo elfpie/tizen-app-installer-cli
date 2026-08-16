@@ -150,12 +150,12 @@ public static class Program
                 }
                 catch (Exception ex)
                 {
-                    AnsiConsole.MarkupLine($"[red]Install failed: {ex.Message}[/]");
+                    AnsiConsole.MarkupLine($"[red]Install failed: {Markup.Escape(ex.Message)}[/]");
                     throw;
                 }
             });
 
-        AnsiConsole.MarkupLine("[bold green]✔ App installed successfully![/]");
+        AnsiConsole.MarkupLine("[bold green]App installed successfully![/]");
         
         AnsiConsole.MarkupLine("[grey]Press any key to exit...[/]");
         Console.ReadKey();
